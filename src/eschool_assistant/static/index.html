@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>eSchool Search Assistant</title>
+<style>
+  :root { --ink:#1b2430; --muted:#5d6b7a; --line:#dde3ea; --brand:#0b4dbb; --bg:#f6f8fb;
+          --met:#157347; --partial:#9a6700; --unknown:#5d6b7a; --no:#b42318; }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--ink); line-height:1.5;
+         font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif }
+  main { max-width:760px; margin:0 auto; padding:32px 16px 64px }
+  h1 { font-size:1.6rem; margin:0 0 4px }
+  .sub { color:var(--muted); margin:0 0 20px }
+  textarea { width:100%; min-height:96px; padding:12px; border:1px solid var(--line);
+             border-radius:10px; font:inherit; resize:vertical; background:#fff; color:inherit }
+  button { margin-top:10px; padding:10px 18px; border:0; border-radius:8px; background:var(--brand);
+           color:#fff; font:inherit; font-weight:600; cursor:pointer }
+  button:disabled { opacity:.6; cursor:progress }
+  .panel { background:#fff; border:1px solid var(--line); border-radius:12px; padding:16px; margin-top:16px }
+  .panel h2 { font-size:.8rem; letter-spacing:.04em; text-transform:uppercase; color:var(--muted); margin:0 0 8px }
+  .panel ul { margin:0; padding-left:20px }
+  .chips { display:flex; flex-wrap:wrap; gap:6px }
+  .chip { background:#eef3fb; border-radius:999px; padding:2px 10px; font-size:.875rem }
+  .school h3 { margin:0; font-size:1.05rem }
+  .school a { color:var(--brand) }
+  .meta { color:var(--muted); font-size:.9rem; margin:2px 0 10px }
+  .check { display:grid; grid-template-columns:20px 1fr; gap:6px; font-size:.925rem; padding:2px 0 }
+  .met { color:var(--met) } .partial { color:var(--partial) }
+  .unknown { color:var(--unknown) } .not_met { color:var(--no) }
+  .message { font-size:1.05rem; font-weight:600; margin:0 }
+  .hint { color:var(--muted); font-size:.85rem; margin-top:8px }
+  .reply { margin-top:12px }
+  .reply textarea { min-height:56px }
+</style>
+</head>
+<body>
+<main>
+  <h1>Find a school in ordinary words</h1>
+  <p class="sub">Describe what you need. Every claim below comes from eSchool's own listings.</p>
+  <form id="form">
+    <label for="query" class="sub">Your request</label>
+    <textarea id="query" maxlength="1000" placeholder="A girls' boarding school in Kampala, up to UGX 1 million per term, for Senior One"></textarea>
+    <button id="go" type="submit">Search</button>
+  </form>
+  <div id="out" aria-live="polite"></div>
+</main>
+<script>
+const SYMBOL = { met: "✓", partial: "~", unknown: "?", not_met: "✗" };
+const out = document.getElementById("out");
+const query = document.getElementById("query");
+
+const FILTER_LABELS = {
+  location: "District", county: "Area", min_fees: "Minimum fees", max_fees: "Maximum fees",
+  gender: "Gender", accomadation: "Day or boarding", levels: "Level",
+  admission_status: "Admissions", curriculums: "Curriculum", facilities: "Facilities",
+  religions: "Religion", q: "School name", sorting: "Sorted by",
+};
+const SORTING = { Popular: "Most popular", FeesLow: "Lowest fees first", Newest: "Newest" };
+
+// eSchool's filter names and spellings are kept in the API response, but parents see plain words.
+function filterText(key, value) {
+  if (key === "min_fees" || key === "max_fees") return `UGX ${value} per term`;
+  if (key === "location" || key === "county") {
+    return value.toLowerCase().replace(/\b(?!or\b)\w/g, letter => letter.toUpperCase());
+  }
+  if (key === "sorting") return SORTING[value] || value;
+  if (key === "levels") return value.replaceAll("Kindergaten", "Kindergarten");
+  return value[0].toUpperCase() + value.slice(1);
+}
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function list(title, items) {
+  if (!items.length) return null;
+  const panel = el("section", "panel");
+  panel.append(el("h2", "", title));
+  const ul = el("ul");
+  items.forEach(item => ul.append(el("li", "", item)));
+  panel.append(ul);
+  return panel;
+}
+
+// The server keeps no conversation, so an answer joins the request and the search runs again.
+function replyForm() {
+  const form = el("form", "reply");
+  const label = el("label", "sub", "Your answer");
+  const answer = el("textarea");
+  answer.id = "reply";
+  answer.maxLength = 300;
+  label.htmlFor = answer.id;
+  const send = el("button", "", "Send answer");
+  send.type = "submit";
+  form.append(label, answer, send);
+  form.addEventListener("submit", event => {
+    event.preventDefault();
+    const text = answer.value.trim();
+    if (!text) return;
+    query.value = `${query.value.trim().replace(/[.\s]+$/, "")}. ${text}`;
+    search();
+  });
+  return form;
+}
+
+function schoolCard(match) {
+  const school = match.school;
+  const card = el("article", "panel school");
+  const heading = el("h3");
+  const link = el("a", "", school.name);
+  link.href = school.url;
+  link.target = "_blank";
+  link.rel = "noopener";
+  heading.append(link);
+  card.append(heading);
+  const facts = [school.level, school.county, school.district, school.gender, school.section,
+                 school.admissions_badge];
+  card.append(el("p", "meta", facts.filter(Boolean).join(" · ")));
+  match.checks.forEach(check => {
+    const row = el("div", "check");
+    row.append(el("span", check.status, SYMBOL[check.status]));
+    row.append(el("span", "", `${check.criterion}: ${check.evidence}`));
+    card.append(row);
+  });
+  return card;
+}
+
+function render(data) {
+  out.replaceChildren();
+  const summary = el("section", "panel");
+  summary.append(el("p", "message", data.message));
+  summary.append(el("p", "hint", `Request read by: ${data.interpreter}`));
+  out.append(summary);
+
+  const filters = Object.entries(data.applied_filters);
+  if (filters.length) {
+    const panel = el("section", "panel");
+    panel.append(el("h2", "", "What I searched for"));
+    const chips = el("div", "chips");
+    filters.forEach(([key, value]) => {
+      chips.append(el("span", "chip", `${FILTER_LABELS[key] || key}: ${filterText(key, value)}`));
+    });
+    panel.append(chips);
+    out.append(panel);
+  }
+  const notes = [...data.notices];
+  if (data.criteria) notes.push(...data.criteria.assumptions.map(a => `Assumed: ${a}`));
+  if (data.not_specified.length) notes.push(`You didn't specify: ${data.not_specified.join(", ")}.`);
+  const asked = data.clarifying_questions.map(q => q.question).filter(q => q !== data.message);
+  const questions = list("Questions for you", asked);
+  if (questions) out.append(questions);
+  if (data.clarifying_questions.length) (questions || summary).append(replyForm());
+  const good = list("Good to know", notes);
+  if (good) out.append(good);
+  data.matches.forEach(match => out.append(schoolCard(match)));
+}
+
+async function search() {
+  const button = document.getElementById("go");
+  if (button.disabled) return;
+  button.disabled = true;
+  const started = Date.now();
+  button.textContent = "Searching… 0s";
+  const timer = setInterval(() => {
+    button.textContent = `Searching… ${Math.round((Date.now() - started) / 1000)}s`;
+  }, 1000);
+  try {
+    const response = await fetch("/api/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: query.value }),
+    });
+    if (!response.ok) throw new Error();
+    render(await response.json());
+  } catch {
+    out.replaceChildren(el("section", "panel", "Something went wrong. Please try again."));
+  } finally {
+    clearInterval(timer);
+    button.disabled = false;
+    button.textContent = "Search";
+  }
+}
+
+document.getElementById("form").addEventListener("submit", event => {
+  event.preventDefault();
+  search();
+});
+</script>
+</body>
+</html>
